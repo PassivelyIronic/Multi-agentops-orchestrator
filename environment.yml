@@ -1,0 +1,17 @@
+name: agentops
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - anthropic>=0.40
+      - google-genai>=1.0
+      - python-dotenv>=1.0
+      - pydantic>=2.0
+      - fastapi>=0.110
+      - uvicorn>=0.30
+      - streamlit>=1.35
+      - pytest>=8.0
+      - ruff>=0.6
+      - black>=24.0
