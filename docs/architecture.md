@@ -96,6 +96,34 @@ means a few failure modes need handling before the happy path matters:
   here since prices change.
 
 
+## Task decomposition & resumability (Phase 3)
+
+The orchestrator turns one incoming task into an ordered list of subtasks
+and routes each to an agent, checkpointing to SQLite after every subtask:
+
+- **Decomposition is one plain LLM call**, reusing `call_with_tools` with
+  an empty tool list rather than a separate code path — retries/backoff
+  apply here too. The model is asked for a JSON array of
+  `{agent, description}` subtasks.
+- **Parsing degrades gracefully, never crashes.** Empty response, malformed
+  JSON, wrong shape, an agent name that doesn't exist — any of these falls
+  back to a single subtask covering the whole original task. Decomposition
+  is a nice-to-have; the task should still run without it.
+- **Routing is keyed by agent name** (`AVAILABLE_AGENTS: dict[str, type[BaseAgent]]`),
+  currently only `"swe"`. Phase 4 adds Tester/On-call/PM as more dict
+  entries — `orchestrator.py` itself doesn't change.
+- **Every subtask is checkpointed to SQLite** (`state.py`) before and after
+  it runs: `pending -> running -> done|failed`. If the process dies
+  mid-subtask, that subtask stays `running` — a resume retries it rather
+  than assuming partial work succeeded.
+- **Resuming skips re-decomposition entirely.** `run(task, task_id=...)`
+  checks for an existing saved plan first; if found, it's reused as-is and
+  execution continues from the first subtask not yet `done`. This is the
+  property the original project pitch (long-running, restartable agent
+  runs) actually depends on — see `scripts/run_orchestrator.py` for how to
+  exercise it manually (interrupt it, re-run with the same `--task-id`).
+
+
 ## Status
 
 This document grows alongside the implementation. See the phase table in the
