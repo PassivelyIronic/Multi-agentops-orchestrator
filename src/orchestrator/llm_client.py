@@ -1,26 +1,36 @@
 """
 Provider-agnostic LLM client with tool-use support.
 
-This is the only module that imports the Gemini or Anthropic SDKs directly.
-Every agent talks to `call_with_tools()` and gets back the same response
-shape regardless of which provider is configured. Two more functions —
-`to_assistant_turn` and `to_tool_result_turn` — build the next conversation
-turn after a tool executes, again hiding the provider-specific shape from
+This is the only module that imports the Gemini, Anthropic, or OpenAI
+(OpenRouter) SDKs directly. Every agent talks to `call_with_tools()` and
+gets back the same response shape regardless of which provider is
+configured. Two more functions — `to_assistant_turn` and
+`to_tool_result_turn` — build the next conversation turn(s) after a tool
+executes, again hiding the provider-specific shape from the agent loop.
+Both return a LIST of turns, not a single turn: Anthropic/Gemini bundle
+multiple tool results into one combined turn (so the list has one
+element), but OpenAI-style APIs (OpenRouter) require one separate message
+per tool result — base_agent.py uses `.extend()`, not `.append()`, on
+whatever these return, so this difference in cardinality is invisible to
 the agent loop.
 
 Resilience: call_with_tools wraps the actual provider call with a retry +
 exponential backoff loop. This covers transient failures — HTTP 429 (rate
-limit) and 5xx (server error) — which both Gemini and Anthropic return under
-the same status-code conventions despite different SDK exception classes.
-It deliberately does NOT retry forever: a 429 caused by "daily quota
-exhausted" won't resolve itself by waiting a few seconds, so after
-max_retries we give up and surface a clear error instead of hanging.
+limit) and 5xx (server error) — which all three providers return under the
+same status-code conventions despite different SDK exception classes. It
+deliberately does NOT retry forever: a 429 caused by "daily quota
+exhausted" (Gemini's free tier is particularly aggressive about this —
+20 requests/day on gemini-2.5-flash at the time of writing) won't resolve
+itself by waiting a few seconds, so after max_retries we give up and
+surface a clear error instead of hanging. OpenRouter's free models exist
+mainly to give a much higher daily ceiling for development/testing.
 
-Note: both `google-genai` and the Anthropic SDK move fast. If a call here
-breaks, check current docs before assuming the logic is wrong — this was
-last verified against google-genai's documented FunctionDeclaration /
-GenerateContentConfig / function_response pattern and Anthropic's
-messages.create tool_use pattern in June 2026.
+Note: all three SDKs move fast. If a call here breaks, check current docs
+before assuming the logic is wrong — this was last verified against
+google-genai's documented FunctionDeclaration / GenerateContentConfig /
+function_response pattern, Anthropic's messages.create tool_use pattern,
+and the OpenAI SDK's chat.completions.create tool-calling pattern (used
+against OpenRouter's OpenAI-compatible endpoint) in June 2026.
 """
 
 from __future__ import annotations
@@ -102,36 +112,71 @@ def call_with_tools(
             max_retries=cfg.max_retries,
             base_delay=cfg.retry_base_delay_seconds,
         )
+    if cfg.llm_provider == "openrouter":
+        return _with_retries(
+            lambda: _call_openrouter(messages, tools, system, cfg),
+            max_retries=cfg.max_retries,
+            base_delay=cfg.retry_base_delay_seconds,
+        )
     raise ValueError(f"Unknown LLM_PROVIDER: {cfg.llm_provider!r}")
 
 
-def to_assistant_turn(response: LLMResponse, config: Config) -> Any:
+def to_assistant_turn(response: LLMResponse, config: Config) -> list[Any]:
     """
-    Build the assistant turn to append to history after a response, in the
-    shape the configured provider expects to see its own prior turn.
+    Build the assistant turn(s) to append to history after a response, in
+    the shape the configured provider expects to see its own prior turn.
+
+    Always returns a list — for Anthropic/Gemini it's a single-element
+    list; OpenAI-style APIs need the same single-element shape here too
+    (it's the *tool result* side, not this one, where OpenAI diverges into
+    multiple messages). The list return type just keeps both functions'
+    signatures consistent so base_agent.py can always use .extend().
     """
     if config.llm_provider == "anthropic":
-        return {"role": "assistant", "content": response.raw.content}
+        return [{"role": "assistant", "content": response.raw.content}]
     if config.llm_provider == "gemini":
-        return response.raw.candidates[0].content
+        return [response.raw.candidates[0].content]
+    if config.llm_provider == "openrouter":
+        message = response.raw.choices[0].message
+        turn: dict[str, Any] = {"role": "assistant", "content": message.content}
+        if message.tool_calls:
+            turn["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in message.tool_calls
+            ]
+        return [turn]
     raise ValueError(f"Unknown LLM_PROVIDER: {config.llm_provider!r}")
 
 
-def to_tool_result_turn(results: list[ToolResult], config: Config) -> Any:
-    """Build the next turn carrying tool execution results back to the model."""
+def to_tool_result_turn(results: list[ToolResult], config: Config) -> list[Any]:
+    """
+    Build the next turn(s) carrying tool execution results back to the
+    model. Anthropic and Gemini bundle every result from one step into a
+    single combined turn (one-element list here). OpenAI-style APIs
+    (OpenRouter) require a *separate* message per tool result — that's a
+    real structural difference, not a stylistic one, which is exactly why
+    this returns a list rather than one turn: callers use .extend(), so
+    the difference in cardinality is invisible to base_agent.py.
+    """
     if config.llm_provider == "anthropic":
-        return {
-            "role": "user",
-            "content": [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": r.tool_call_id,
-                    "content": r.output,
-                    **({"is_error": True} if r.is_error else {}),
-                }
-                for r in results
-            ],
-        }
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": r.tool_call_id,
+                        "content": r.output,
+                        **({"is_error": True} if r.is_error else {}),
+                    }
+                    for r in results
+                ],
+            }
+        ]
     if config.llm_provider == "gemini":
         from google.genai import types
 
@@ -142,7 +187,11 @@ def to_tool_result_turn(results: list[ToolResult], config: Config) -> Any:
             )
             for r in results
         ]
-        return types.Content(role="tool", parts=parts)
+        return [types.Content(role="tool", parts=parts)]
+    if config.llm_provider == "openrouter":
+        return [
+            {"role": "tool", "tool_call_id": r.tool_call_id, "content": r.output} for r in results
+        ]
     raise ValueError(f"Unknown LLM_PROVIDER: {config.llm_provider!r}")
 
 
@@ -313,3 +362,80 @@ def _to_gemini_content(message: Any):
 def _to_gemini_role(role: str) -> str:
     """Gemini uses 'model' where Anthropic/OpenAI use 'assistant'."""
     return "model" if role == "assistant" else "user"
+
+
+# --------------------------------------------------------------------------
+# OpenRouter (OpenAI-compatible)
+# --------------------------------------------------------------------------
+
+
+def _call_openrouter(
+    messages: list[Any],
+    tools: list[dict[str, Any]],
+    system: str | None,
+    cfg: Config,
+) -> LLMResponse:
+    import json
+
+    from openai import OpenAI
+
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=cfg.openrouter_api_key,
+        timeout=cfg.llm_request_timeout_seconds,
+    )
+
+    # OpenAI-style messages already match our generic {"role", "content"}
+    # dicts and the dicts to_assistant_turn/to_tool_result_turn build for
+    # this provider — no per-message conversion needed, unlike Gemini.
+    openai_messages: list[dict[str, Any]] = []
+    if system:
+        openai_messages.append({"role": "system", "content": system})
+    openai_messages.extend(messages)
+
+    openai_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+            },
+        }
+        for tool in tools
+    ]
+
+    response = client.chat.completions.create(
+        model=cfg.openrouter_model,
+        messages=openai_messages,
+        tools=openai_tools or None,
+        extra_headers={
+            # Optional per OpenRouter's docs — only affects their public
+            # leaderboards, not functionality. Harmless either way.
+            "X-Title": "AgentOps Orchestrator",
+        },
+    )
+
+    message = response.choices[0].message
+    tool_calls = []
+    for tc in message.tool_calls or []:
+        try:
+            arguments = json.loads(tc.function.arguments) if tc.function.arguments else {}
+        except json.JSONDecodeError:
+            # A weaker/free model returned malformed JSON in the tool call
+            # arguments. Don't crash the whole task over it — package it as
+            # an unexpected kwarg so the registry's existing tool-error
+            # isolation (in base_agent._execute_tool) turns this into a
+            # normal error ToolResult the model can see and recover from,
+            # the same way any other bad tool call already degrades.
+            arguments = {"_malformed_arguments": tc.function.arguments}
+        tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=arguments))
+
+    usage = response.usage
+    return LLMResponse(
+        text=message.content if not tool_calls else None,
+        tool_calls=tool_calls,
+        input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+        output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        raw=response,
+    )

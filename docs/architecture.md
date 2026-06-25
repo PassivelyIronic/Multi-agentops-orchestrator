@@ -38,13 +38,27 @@ flowchart TB
 
 ## Why a provider-agnostic LLM client
 
-`llm_client.py` normalizes Gemini's and Anthropic's tool-use APIs into one
-`LLMResponse` shape. Agents only ever call `call_with_tools()` — they don't
-know or care which provider answered. This means:
+`llm_client.py` normalizes Gemini's, Anthropic's, and OpenRouter's
+(OpenAI-compatible) tool-use APIs into one `LLMResponse` shape. Agents only
+ever call `call_with_tools()` — they don't know or care which provider
+answered. This means:
 
-- Development happens for free against a Gemini key.
-- Switching to Anthropic (e.g. for evaluation runs, or a cost/quality
-  comparison) is a one-line env var change, not a rewrite.
+- Development happens for free against a Gemini or OpenRouter key.
+- Switching providers (e.g. one provider's free tier is exhausted for the
+  day, or for a cost/quality comparison) is a one-line env var change, not
+  a rewrite.
+
+One real structural difference surfaced when adding the third provider:
+Anthropic and Gemini bundle multiple tool results from one step into a
+single combined turn, but OpenAI-style APIs require a *separate* message
+per tool result. `to_assistant_turn` / `to_tool_result_turn` both return a
+list of turns rather than one turn for exactly this reason — the agent
+loop always `.extend()`s, so the difference in cardinality is invisible to
+`base_agent.py`. Weaker free models are also more likely to return
+malformed JSON in a tool call's arguments than Gemini or Claude; rather
+than let that crash the task, `_call_openrouter` packages it as a marked
+argument that the existing tool-error isolation in `_execute_tool` turns
+into a normal error result the model can see and recover from.
 
 ## Resilience, guardrails & tracing (Phase 1-2)
 
@@ -69,6 +83,18 @@ means a few failure modes need handling before the happy path matters:
   not a crashed task — the model gets a chance to adapt and, in practice,
   often does (see the fizzbuzz example in the project history: the agent
   ran pytest, read the failure, fixed the bug, and re-ran tests on its own).
+- **LLM call errors are isolated the same way.** This one wasn't there from
+  the start — it surfaced when a real orchestrator run hit Gemini's daily
+  quota mid-task: the exception escaped `call_with_tools` after retries
+  were exhausted and crashed the whole process with a raw traceback,
+  despite the resumability machinery in `state.py` already being able to
+  handle exactly this case. `BaseAgent.run()` now catches it and returns a
+  normal `AgentResult(stopped_reason="api_error", error=...)`, and
+  `orchestrator.py`'s own decomposition call gets the same treatment
+  (`stopped_reason="decomposition_error"`, with nothing partially saved —
+  a retry with the same task_id re-decomposes cleanly). The result: a
+  quota/network failure marks one subtask failed and stays resumable,
+  instead of taking down the run.
 - **Sandboxing**, hardcoded into the tools themselves. Filesystem tools
   resolve every path and reject anything outside the sandbox root
   (including `../` traversal and absolute paths). The exec tool uses

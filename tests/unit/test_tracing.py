@@ -95,6 +95,34 @@ def test_cost_is_computed_when_pricing_is_configured(tmp_path):
     assert record["estimated_cost_usd"] == 3.0  # 1*1.0 + 1*2.0
 
 
+def test_log_llm_error_writes_expected_fields(tmp_path):
+    tracer = TraceLogger(task_id="t7", config=_fake_config(tmp_path))
+    tracer.log_llm_error(step=2, latency_seconds=0.5, error="429 RESOURCE_EXHAUSTED: daily quota")
+
+    record = _read_records(tmp_path / "t7.jsonl")[0]
+    assert record["type"] == "llm_error"
+    assert record["step"] == 2
+    assert "429" in record["error"]
+
+
+def test_log_task_end_includes_error_when_provided(tmp_path):
+    tracer = TraceLogger(task_id="t8", config=_fake_config(tmp_path))
+    tracer.log_task_end(
+        "api_error", steps_taken=1, total_input_tokens=50, total_output_tokens=0, error="boom"
+    )
+
+    record = _read_records(tmp_path / "t8.jsonl")[0]
+    assert record["error"] == "boom"
+
+
+def test_log_task_end_omits_error_key_when_none(tmp_path):
+    tracer = TraceLogger(task_id="t9", config=_fake_config(tmp_path))
+    tracer.log_task_end("done", steps_taken=1, total_input_tokens=50, total_output_tokens=10)
+
+    record = _read_records(tmp_path / "t9.jsonl")[0]
+    assert "error" not in record
+
+
 def test_multiple_calls_append_rather_than_overwrite(tmp_path):
     tracer = TraceLogger(task_id="t6", config=_fake_config(tmp_path))
     tracer.log_llm_call(step=1, latency_seconds=0.1, input_tokens=10, output_tokens=5)

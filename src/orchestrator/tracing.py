@@ -53,6 +53,16 @@ class TraceLogger:
             }
         )
 
+    def log_llm_error(self, step: int, latency_seconds: float, error: str) -> None:
+        self._write(
+            {
+                "type": "llm_error",
+                "step": step,
+                "latency_seconds": round(latency_seconds, 3),
+                "error": _truncate(error),
+            }
+        )
+
     def log_tool_call(
         self,
         step: int,
@@ -82,19 +92,21 @@ class TraceLogger:
         steps_taken: int,
         total_input_tokens: int,
         total_output_tokens: int,
+        error: str | None = None,
     ) -> None:
-        self._write(
-            {
-                "type": "task_end",
-                "stopped_reason": stopped_reason,
-                "steps_taken": steps_taken,
-                "total_input_tokens": total_input_tokens,
-                "total_output_tokens": total_output_tokens,
-                "estimated_cost_usd": _estimate_cost(
-                    self.config, total_input_tokens, total_output_tokens
-                ),
-            }
-        )
+        record = {
+            "type": "task_end",
+            "stopped_reason": stopped_reason,
+            "steps_taken": steps_taken,
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+            "estimated_cost_usd": _estimate_cost(
+                self.config, total_input_tokens, total_output_tokens
+            ),
+        }
+        if error:
+            record["error"] = error
+        self._write(record)
 
     def _write(self, record: dict[str, Any]) -> None:
         record["timestamp"] = time.time()
@@ -120,7 +132,10 @@ def _estimate_cost(cfg: Config, input_tokens: int, output_tokens: int) -> float:
     if cfg.llm_provider == "gemini":
         in_price = cfg.gemini_input_price_per_million
         out_price = cfg.gemini_output_price_per_million
-    else:
+    elif cfg.llm_provider == "anthropic":
         in_price = cfg.anthropic_input_price_per_million
         out_price = cfg.anthropic_output_price_per_million
+    else:
+        in_price = cfg.openrouter_input_price_per_million
+        out_price = cfg.openrouter_output_price_per_million
     return round(input_tokens / 1_000_000 * in_price + output_tokens / 1_000_000 * out_price, 6)

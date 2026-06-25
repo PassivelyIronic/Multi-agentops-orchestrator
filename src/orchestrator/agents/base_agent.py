@@ -41,11 +41,12 @@ from ..tracing import TraceLogger, new_task_id
 class AgentResult:
     final_text: str | None
     steps_taken: int
-    # "done" | "step_limit" | "task_timeout" | "token_budget" | "repetition"
+    # "done" | "step_limit" | "task_timeout" | "token_budget" | "repetition" | "api_error"
     stopped_reason: str
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     task_id: str = ""
+    error: str | None = None
 
 
 class BaseAgent:
@@ -80,9 +81,25 @@ class BaseAgent:
                 return self._finish(None, step - 1, "task_timeout", total_in, total_out, task_id)
 
             call_start = time.monotonic()
-            response = call_with_tools(
-                messages, tools, system=self.system_prompt, config=self.config
-            )
+            try:
+                response = call_with_tools(
+                    messages, tools, system=self.system_prompt, config=self.config
+                )
+            except Exception as exc:
+                # Same philosophy as tool-error isolation below: anything
+                # escaping the LLM call itself (retries exhausted on a 429,
+                # an exhausted daily quota, a network failure) ends the
+                # task gracefully instead of crashing the whole process —
+                # important specifically because orchestrator.py routes
+                # through this, and a raw exception here used to take down
+                # the entire run instead of marking one subtask failed
+                # (which the existing resume logic already handles
+                # correctly once it gets a clean stopped_reason instead of
+                # an uncaught exception).
+                self.tracer.log_llm_error(step, time.monotonic() - call_start, str(exc))
+                return self._finish(
+                    None, step - 1, "api_error", total_in, total_out, task_id, error=str(exc)
+                )
             self.tracer.log_llm_call(
                 step, time.monotonic() - call_start, response.input_tokens, response.output_tokens
             )
@@ -110,8 +127,8 @@ class BaseAgent:
 
             results = [self._execute_tool(call, step) for call in response.tool_calls]
 
-            messages.append(to_assistant_turn(response, self.config))
-            messages.append(to_tool_result_turn(results, self.config))
+            messages.extend(to_assistant_turn(response, self.config))
+            messages.extend(to_tool_result_turn(results, self.config))
 
         return self._finish(
             None, self.config.max_steps_per_agent, "step_limit", total_in, total_out, task_id
@@ -125,9 +142,12 @@ class BaseAgent:
         total_in: int,
         total_out: int,
         task_id: str,
+        error: str | None = None,
     ) -> AgentResult:
-        self.tracer.log_task_end(stopped_reason, steps_taken, total_in, total_out)
-        return AgentResult(final_text, steps_taken, stopped_reason, total_in, total_out, task_id)
+        self.tracer.log_task_end(stopped_reason, steps_taken, total_in, total_out, error=error)
+        return AgentResult(
+            final_text, steps_taken, stopped_reason, total_in, total_out, task_id, error
+        )
 
     def _execute_tool(self, call: ToolCall, step: int) -> ToolResult:
         tool_start = time.monotonic()

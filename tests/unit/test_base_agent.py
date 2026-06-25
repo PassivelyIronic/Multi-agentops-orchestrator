@@ -49,11 +49,15 @@ def _registry_with_echo_tool() -> ToolRegistry:
 def _stub_turn_builders(monkeypatch):
     """The loop only cares that *something* gets appended to history between
     steps — the exact shape is llm_client's concern and already covered by
-    its own tests, so we stub it out here to keep these tests focused."""
+    its own tests, so we stub it out here to keep these tests focused.
+    Both real functions return lists now (base_agent.py uses .extend()),
+    so the stubs must too."""
     monkeypatch.setattr(
-        base_agent_module, "to_assistant_turn", lambda *a, **k: {"role": "assistant"}
+        base_agent_module, "to_assistant_turn", lambda *a, **k: [{"role": "assistant"}]
     )
-    monkeypatch.setattr(base_agent_module, "to_tool_result_turn", lambda *a, **k: {"role": "user"})
+    monkeypatch.setattr(
+        base_agent_module, "to_tool_result_turn", lambda *a, **k: [{"role": "user"}]
+    )
 
 
 class _EchoAgent(BaseAgent):
@@ -282,6 +286,44 @@ def test_guardrail_blocks_dangerous_command_before_execution(monkeypatch, tmp_pa
 
     assert called["hit"] is False
     assert result.stopped_reason == "done"
+
+
+def test_llm_call_failure_is_caught_gracefully(monkeypatch, tmp_path):
+    """An exception escaping call_with_tools (e.g. retries exhausted on a
+    429 / exhausted daily quota) must not crash the whole task — it
+    becomes a graceful AgentResult, the same way a bad tool call already
+    does. This is what lets orchestrator.py mark the subtask failed and
+    resume it later instead of the whole process dying."""
+
+    def always_raises(*args, **kwargs):
+        raise RuntimeError("429 RESOURCE_EXHAUSTED: daily quota exceeded")
+
+    monkeypatch.setattr(base_agent_module, "call_with_tools", always_raises)
+
+    agent = _EchoAgent(config=_fake_config(tmp_path), tool_registry=_registry_with_echo_tool())
+    result = agent.run("do the thing")
+
+    assert result.stopped_reason == "api_error"
+    assert result.error is not None
+    assert "429" in result.error
+    assert result.steps_taken == 0
+
+
+def test_llm_call_failure_is_logged_to_trace(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        base_agent_module,
+        "call_with_tools",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    agent = _EchoAgent(config=_fake_config(tmp_path), tool_registry=_registry_with_echo_tool())
+    result = agent.run("do the thing")
+
+    trace_path = tmp_path / f"{result.task_id}.jsonl"
+    records = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    types_seen = {r["type"] for r in records}
+    assert "llm_error" in types_seen
+    assert "task_end" in types_seen
 
 
 def test_trace_file_is_written(monkeypatch, tmp_path):

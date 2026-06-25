@@ -23,12 +23,18 @@ load_dotenv()  # no-op if no .env file is present (e.g. in CI)
 
 @dataclass(frozen=True)
 class Config:
-    llm_provider: str  # "gemini" | "anthropic"
+    llm_provider: str  # "gemini" | "anthropic" | "openrouter"
     gemini_api_key: str | None
     anthropic_api_key: str | None
+    openrouter_api_key: str | None = None
 
     gemini_model: str = "gemini-2.5-flash"
     anthropic_model: str = "claude-sonnet-4-6"
+    # gpt-oss-120b is OpenAI's open-weight model, specifically tuned for
+    # tool-calling/agentic use — a better fit here than most other free
+    # OpenRouter models, which mostly aren't built with tool use in mind.
+    # gpt-oss-20b is ~4x the throughput if 120b is too slow for your testing.
+    openrouter_model: str = "openai/gpt-oss-120b:free"
 
     # --- Resilience -----------------------------------------------------
     # Retries cover transient failures (HTTP 429 rate limits, 5xx server
@@ -73,6 +79,8 @@ class Config:
     gemini_output_price_per_million: float = 0.0
     anthropic_input_price_per_million: float = 0.0
     anthropic_output_price_per_million: float = 0.0
+    openrouter_input_price_per_million: float = 0.0
+    openrouter_output_price_per_million: float = 0.0
 
     db_path: str = "orchestrator_state.db"
 
@@ -90,8 +98,10 @@ def get_config() -> Config:
         llm_provider=provider,
         gemini_api_key=os.getenv("GEMINI_API_KEY"),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+        openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
         anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+        openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free"),
         max_retries=int(os.getenv("MAX_RETRIES", "4")),
         retry_base_delay_seconds=float(os.getenv("RETRY_BASE_DELAY_SECONDS", "1.0")),
         llm_request_timeout_seconds=int(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "60")),
@@ -112,15 +122,24 @@ def get_config() -> Config:
         anthropic_output_price_per_million=float(
             os.getenv("ANTHROPIC_OUTPUT_PRICE_PER_MILLION", "0.0")
         ),
+        openrouter_input_price_per_million=float(
+            os.getenv("OPENROUTER_INPUT_PRICE_PER_MILLION", "0.0")
+        ),
+        openrouter_output_price_per_million=float(
+            os.getenv("OPENROUTER_OUTPUT_PRICE_PER_MILLION", "0.0")
+        ),
         db_path=os.getenv("DB_PATH", "orchestrator_state.db"),
     )
 
-    if provider == "gemini" and not cfg.gemini_api_key:
-        raise RuntimeError("LLM_PROVIDER=gemini but GEMINI_API_KEY is not set")
-    if provider == "anthropic" and not cfg.anthropic_api_key:
-        raise RuntimeError("LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set")
-    if provider not in ("gemini", "anthropic"):
+    required_key_by_provider = {
+        "gemini": cfg.gemini_api_key,
+        "anthropic": cfg.anthropic_api_key,
+        "openrouter": cfg.openrouter_api_key,
+    }
+    if provider not in required_key_by_provider:
         raise ValueError(f"Unknown LLM_PROVIDER: {provider!r}")
+    if not required_key_by_provider[provider]:
+        raise RuntimeError(f"LLM_PROVIDER={provider} but its API key env var is not set")
 
     return cfg
 
