@@ -23,7 +23,12 @@ from __future__ import annotations
 import argparse
 
 from orchestrator.orchestrator import run
-from orchestrator.tools import exec_tools, filesystem_tools  # noqa: F401  (registers tools)
+from orchestrator.tools import (  # noqa: F401  (imports register tools as a side effect)
+    exec_tools,
+    filesystem_tools,
+    monitoring_tools,
+    search_tools,
+)
 from orchestrator.tracing import new_task_id
 
 

@@ -45,6 +45,7 @@ and stop calling tools.
 
 
 class SweAgent(BaseAgent):
+    agent_name = "swe"
     tool_names = ["read_file", "write_file", "list_dir", "run_command"]
 
     def __init__(self, *args, **kwargs) -> None:

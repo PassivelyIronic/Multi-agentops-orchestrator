@@ -343,3 +343,55 @@ def test_trace_file_is_written(monkeypatch, tmp_path):
     types_seen = {r["type"] for r in records}
     assert "llm_call" in types_seen
     assert "task_end" in types_seen
+
+
+def test_role_scoped_guardrail_blocks_before_real_tool_runs(monkeypatch, tmp_path):
+    """End-to-end wiring check (Phase 4): an agent identifying as "tester"
+    must have its write_file call to a non-test path blocked by the real
+    (non-mocked) guardrails.check — and the real write_file function must
+    never actually execute. This is the integration point between
+    base_agent.py passing self.agent_name through and guardrails.py's
+    role-scoped rule actually using it."""
+    written = {"hit": False}
+
+    def fake_write_file(path, content):
+        written["hit"] = True
+        return f"wrote {path}"
+
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="write_file",
+            description="Writes a file.",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            },
+            fn=fake_write_file,
+        )
+    )
+
+    responses = [
+        LLMResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(
+                    id="1", name="write_file", arguments={"path": "fizzbuzz.py", "content": "x"}
+                )
+            ],
+        ),
+        LLMResponse(text="done", tool_calls=[]),
+    ]
+    monkeypatch.setattr(base_agent_module, "call_with_tools", lambda *a, **k: responses.pop(0))
+    _stub_turn_builders(monkeypatch)
+
+    class _TesterLikeAgent(BaseAgent):
+        agent_name = "tester"
+        system_prompt = "test"
+        tool_names = ["write_file"]
+
+    agent = _TesterLikeAgent(config=_fake_config(tmp_path), tool_registry=reg)
+    result = agent.run("write tests, but try to write to fizzbuzz.py instead")
+
+    assert written["hit"] is False  # the real tool function never ran
+    assert result.stopped_reason == "done"  # the agent loop itself didn't crash

@@ -69,3 +69,79 @@ def test_blocks_write_exceeding_max_bytes():
 
 def test_unrelated_tool_is_never_blocked():
     assert check("read_file", {"path": "anything"}, _fake_config()) is None
+
+
+# --- role-scoped write restrictions (Phase 4) ----------------------------
+
+
+def test_tester_can_write_test_files():
+    cfg = _fake_config()
+    assert (
+        check("write_file", {"path": "test_fizzbuzz.py", "content": "x"}, cfg, agent_name="tester")
+        is None
+    )
+    assert (
+        check("write_file", {"path": "fizzbuzz_test.py", "content": "x"}, cfg, agent_name="tester")
+        is None
+    )
+
+
+def test_tester_cannot_write_implementation_files():
+    violation = check(
+        "write_file", {"path": "fizzbuzz.py", "content": "x"}, _fake_config(), agent_name="tester"
+    )
+    assert violation is not None
+    assert "test" in violation.reason.lower()
+
+
+def test_tester_restriction_respects_nested_paths():
+    # The check looks at the filename, not just a prefix match on the
+    # whole path — "src/tests/test_foo.py" is fine, "src/foo.py" isn't.
+    cfg = _fake_config()
+    assert (
+        check(
+            "write_file", {"path": "sub/dir/test_foo.py", "content": "x"}, cfg, agent_name="tester"
+        )
+        is None
+    )
+    assert (
+        check("write_file", {"path": "sub/dir/foo.py", "content": "x"}, cfg, agent_name="tester")
+        is not None
+    )
+
+
+def test_swe_is_not_restricted_to_test_files():
+    # The same write that's blocked for "tester" is fine for "swe" (or no
+    # agent_name at all) — the restriction is role-scoped, not global.
+    cfg = _fake_config()
+    assert (
+        check("write_file", {"path": "fizzbuzz.py", "content": "x"}, cfg, agent_name="swe") is None
+    )
+    assert check("write_file", {"path": "fizzbuzz.py", "content": "x"}, cfg) is None
+
+
+def test_pm_can_write_markdown():
+    cfg = _fake_config()
+    assert check("write_file", {"path": "BACKLOG.md", "content": "x"}, cfg, agent_name="pm") is None
+
+
+def test_pm_cannot_write_code():
+    violation = check(
+        "write_file", {"path": "main.py", "content": "x"}, _fake_config(), agent_name="pm"
+    )
+    assert violation is not None
+    assert "markdown" in violation.reason.lower()
+
+
+# --- health_check SSRF guard (Phase 4) -----------------------------------
+
+
+def test_blocks_health_check_to_cloud_metadata_endpoint():
+    violation = check(
+        "health_check", {"url": "http://169.254.169.254/latest/meta-data/"}, _fake_config()
+    )
+    assert violation is not None
+
+
+def test_allows_health_check_to_ordinary_url():
+    assert check("health_check", {"url": "https://example.com/health"}, _fake_config()) is None

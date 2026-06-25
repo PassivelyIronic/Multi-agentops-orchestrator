@@ -16,7 +16,13 @@ from orchestrator import state
 from orchestrator.agents.base_agent import AgentResult
 from orchestrator.config import Config
 from orchestrator.llm_client import LLMResponse
-from orchestrator.orchestrator import Subtask, _parse_subtasks, run
+from orchestrator.orchestrator import (
+    AGENT_DESCRIPTIONS,
+    AVAILABLE_AGENTS,
+    Subtask,
+    _parse_subtasks,
+    run,
+)
 
 
 def _fake_config(tmp_path, **overrides) -> Config:
@@ -228,3 +234,26 @@ def test_run_resumes_after_partial_completion(monkeypatch, tmp_path):
     assert decompose_called["hit"] is False  # resumed from saved plan, never re-decomposed
     assert _FakeAgent.calls == ["still pending"]
     assert result.stopped_reason == "done"
+
+
+# --- Phase 4: all four agent roles wired consistently --------------------
+
+
+def test_all_four_agent_roles_are_registered():
+    assert set(AVAILABLE_AGENTS.keys()) == {"swe", "tester", "oncall", "pm"}
+
+
+def test_every_available_agent_has_a_decomposition_description():
+    # AGENT_DESCRIPTIONS feeds the decomposition prompt — if an agent is
+    # routable but undescribed, the model has no way to know when to pick it.
+    for name in AVAILABLE_AGENTS:
+        assert name in AGENT_DESCRIPTIONS
+        assert AGENT_DESCRIPTIONS[name].strip()
+
+
+def test_agent_classes_self_identify_with_matching_key():
+    # AVAILABLE_AGENTS is built from each class's own agent_name — this
+    # guards against the dict key and the class's self-identification
+    # (used by guardrails.py's role checks) ever drifting apart.
+    for name, cls in AVAILABLE_AGENTS.items():
+        assert cls.agent_name == name

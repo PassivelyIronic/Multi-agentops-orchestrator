@@ -30,7 +30,7 @@ model APIs).
 | 1 | Single agent + tools (agent loop, step limits, resilience, sandboxing) | ✅ |
 | 2 | Guardrails (command/path policy, audit-logged blocks) + structured tracing | ✅ |
 | 3 | Orchestrator (task decomposition, SQLite state, routing, resumability) | ✅ |
-| 4 | Remaining agents (Tester, On-call, PM) | ⬜ |
+| 4 | Remaining agents (Tester, On-call, PM) | ✅ |
 | 5 | Eval harness (golden dataset, LLM-as-judge) | ⬜ |
 | 6 | Dashboard + polish | ⬜ |
 
@@ -40,21 +40,40 @@ model APIs).
 conda env create -f environment.yml
 conda activate agentops
 cp .env.example .env   # fill in at least one API key
-pytest                  # 85 tests, all mocked — no API key needed to run these
+pytest                  # 112 tests, all mocked — no API key needed to run these
 
 # Real end-to-end smoke test, single agent (uses your API key):
 PYTHONPATH=src python scripts/run_swe_agent.py "create hello.txt containing 'hi'"
 
-# Orchestrator: decomposes the task, routes subtasks, checkpoints to SQLite
+# Any agent role in isolation (swe | tester | oncall | pm):
+PYTHONPATH=src python scripts/run_agent.py tester "write tests for fizzbuzz.py"
+
+# Orchestrator: decomposes the task, routes subtasks across roles, checkpoints to SQLite
 PYTHONPATH=src python scripts/run_orchestrator.py "create fizzbuzz.py with tests, then run them"
 ```
 
+## Agent roles
+
+| Role | Tools | Can write | Notes |
+|---|---|---|---|
+| `swe` | read/write/list/run_command | anywhere in the sandbox | implementation work |
+| `tester` | read/write/list/run_command | `test_*.py` / `*_test.py` only | writes & runs tests, never fixes code — that's `swe`'s job |
+| `oncall` | query_traces, health_check, read/list | nothing | read-only; investigates the project's own trace logs |
+| `pm` | web_search, write/read/list | `*.md` only | turns a requirement into a prioritized markdown backlog |
+
+`tester` and `swe` share the same tool *names* — what makes them different
+roles is enforced by a guardrail (write path restricted by `agent_name`),
+not just a system-prompt suggestion a model could ignore. `oncall` has no
+`write_file` at all: least privilege for a role that only ever observes.
+
 The SWE agent reads/writes files and runs shell commands inside `./workspace`
 (configurable via `SANDBOX_DIR`). Every run writes a JSONL trace to
-`./traces/<task_id>.jsonl`. The orchestrator additionally checkpoints its
-plan to `orchestrator_state.db` (SQLite) — re-running `run_orchestrator.py`
-with `--task-id <same id>` after an interruption resumes instead of
-restarting from scratch.
+`./traces/<task_id>.jsonl` — which is exactly what `oncall`'s `query_traces`
+tool reads; there's no separate fake "production log" concept, it
+investigates the same operational data Phase 2 already generates. The
+orchestrator additionally checkpoints its plan to `orchestrator_state.db`
+(SQLite) — re-running `run_orchestrator.py` with `--task-id <same id>` after
+an interruption resumes instead of restarting from scratch.
 
 ## LLM provider
 

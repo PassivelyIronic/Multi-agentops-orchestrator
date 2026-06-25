@@ -51,6 +51,11 @@ class AgentResult:
 
 class BaseAgent:
     system_prompt: str = ""
+    # Identifies the role to guardrails.py (e.g. "tester" can only write
+    # test_*.py files) and to AVAILABLE_AGENTS in orchestrator.py, which
+    # builds its routing dict from this rather than a separately
+    # maintained string, so the two can't drift out of sync.
+    agent_name: str = "base"
     # Subclasses override this with their own list — never mutated in place,
     # so sharing this empty list as a class-level default is safe.
     tool_names: list[str] = []
@@ -162,7 +167,9 @@ class BaseAgent:
             self._log_tool(step, call, result, blocked=True, latency=time.monotonic() - tool_start)
             return result
 
-        violation = guardrails.check(call.name, call.arguments, self.config)
+        violation = guardrails.check(
+            call.name, call.arguments, self.config, agent_name=self.agent_name
+        )
         if violation is not None:
             result = ToolResult(
                 tool_call_id=call.id, name=call.name, output=violation.reason, is_error=True
