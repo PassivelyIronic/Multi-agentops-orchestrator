@@ -139,6 +139,57 @@ def test_run_stops_on_subtask_failure(monkeypatch, tmp_path):
     assert result.stopped_reason == "subtask_failed"
 
 
+def test_run_propagates_subtask_error_message(monkeypatch, tmp_path):
+    """An api_error from a subtask (e.g. exhausted retries on a 429) should
+    surface its .error message on the OrchestratorResult too, not just the
+    generic 'subtask_failed' reason."""
+
+    class _ApiErrorAgent:
+        def __init__(self, config=None):
+            self.config = config
+
+        def run(self, description, task_id=None):
+            return AgentResult(
+                final_text=None,
+                steps_taken=0,
+                stopped_reason="api_error",
+                error="429 RESOURCE_EXHAUSTED: daily quota exceeded",
+            )
+
+    monkeypatch.setattr(orchestrator_module, "AVAILABLE_AGENTS", {"swe": _ApiErrorAgent})
+    monkeypatch.setattr(
+        orchestrator_module,
+        "call_with_tools",
+        lambda *a, **k: LLMResponse(text=json.dumps([{"agent": "swe", "description": "x"}])),
+    )
+
+    result = run("a task", config=_fake_config(tmp_path), task_id="task-3b")
+
+    assert result.stopped_reason == "subtask_failed"
+    assert result.error is not None
+    assert "429" in result.error
+
+
+def test_run_handles_decomposition_failure_gracefully(monkeypatch, tmp_path):
+    """If the decomposition LLM call itself exhausts retries (e.g. daily
+    quota gone before any plan exists), run() must return a clean result —
+    not crash the whole script — and must not have saved a partial plan,
+    since a retry with the same task_id should re-decompose from scratch."""
+    monkeypatch.setattr(
+        orchestrator_module,
+        "call_with_tools",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("429 RESOURCE_EXHAUSTED")),
+    )
+
+    cfg = _fake_config(tmp_path)
+    result = run("a task", config=cfg, task_id="task-6")
+
+    assert result.stopped_reason == "decomposition_error"
+    assert result.error is not None
+    assert "429" in result.error
+    assert state.load_subtasks("task-6", cfg) == []  # nothing partially saved
+
+
 def test_run_rejects_unknown_agent_in_plan(tmp_path):
     # Decomposition itself only ever returns valid agents (_parse_subtasks
     # guarantees that), so to exercise this path we pre-seed state with a

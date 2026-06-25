@@ -57,8 +57,9 @@ class Subtask:
 class OrchestratorResult:
     task_id: str
     subtask_results: list[tuple[Subtask, AgentResult]] = field(default_factory=list)
-    # "done" | "subtask_failed" | "unknown_agent"
+    # "done" | "subtask_failed" | "unknown_agent" | "decomposition_error"
     stopped_reason: str = "done"
+    error: str | None = None
 
 
 def run(task: str, config: Config | None = None, task_id: str | None = None) -> OrchestratorResult:
@@ -70,7 +71,15 @@ def run(task: str, config: Config | None = None, task_id: str | None = None) -> 
         subtasks = [Subtask(agent=r.agent, description=r.description) for r in existing]
         start_index = next((r.subtask_index for r in existing if r.status != "done"), len(existing))
     else:
-        subtasks = _decompose(task, cfg)
+        try:
+            subtasks = _decompose(task, cfg)
+        except Exception as exc:
+            # All retries already exhausted inside call_with_tools (rate
+            # limit, exhausted daily quota, network failure...). Nothing is
+            # saved yet at this point, so a retry with the same task_id
+            # re-decomposes from scratch rather than resuming mid-plan —
+            # there's no partial plan to preserve.
+            return OrchestratorResult(task_id, [], "decomposition_error", error=str(exc))
         state.save_plan(task_id, task, subtasks, cfg)
         start_index = 0
 
@@ -85,12 +94,16 @@ def run(task: str, config: Config | None = None, task_id: str | None = None) -> 
             return OrchestratorResult(task_id, results, "unknown_agent")
 
         state.mark_subtask_running(task_id, index, cfg)
+        # BaseAgent.run() never raises — an exhausted-retries API failure
+        # comes back as stopped_reason="api_error" with .error set, same as
+        # any other non-"done" outcome (step_limit, timeout, ...). That's
+        # what the check just below is for; no try/except needed here.
         agent_result = agent_cls(config=cfg).run(subtask.description, task_id=f"{task_id}-{index}")
         results.append((subtask, agent_result))
 
         if agent_result.stopped_reason != "done":
             state.mark_subtask_failed(task_id, index, agent_result.stopped_reason, cfg)
-            return OrchestratorResult(task_id, results, "subtask_failed")
+            return OrchestratorResult(task_id, results, "subtask_failed", error=agent_result.error)
 
         state.mark_subtask_done(task_id, index, agent_result.final_text or "", cfg)
 

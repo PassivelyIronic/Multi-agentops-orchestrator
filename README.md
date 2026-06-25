@@ -40,7 +40,7 @@ model APIs).
 conda env create -f environment.yml
 conda activate agentops
 cp .env.example .env   # fill in at least one API key
-pytest                  # 69 tests, all mocked — no API key needed to run these
+pytest                  # 85 tests, all mocked — no API key needed to run these
 
 # Real end-to-end smoke test, single agent (uses your API key):
 PYTHONPATH=src python scripts/run_swe_agent.py "create hello.txt containing 'hi'"
@@ -55,6 +55,27 @@ The SWE agent reads/writes files and runs shell commands inside `./workspace`
 plan to `orchestrator_state.db` (SQLite) — re-running `run_orchestrator.py`
 with `--task-id <same id>` after an interruption resumes instead of
 restarting from scratch.
+
+## LLM provider
+
+Set `LLM_PROVIDER` in `.env` to `gemini`, `anthropic`, or `openrouter`.
+
+- **Gemini** free tier on `gemini-2.5-flash`: ~5 requests/minute, **20 requests/day**.
+  An orchestrator run (decomposition + several agent steps) burns through
+  that in a single test.
+- **OpenRouter** free tier (`:free` models, default `openai/gpt-oss-120b:free`):
+  **50 requests/day, 20/minute** on a free/unfunded account; **1,000/day**
+  once you've purchased $10+ in credits (the *models* stay free either
+  way — paying just raises the account-level ceiling). Source:
+  [OpenRouter rate limits FAQ](https://openrouter.ai/docs/faq).
+
+**Gotcha that affects our own retry logic:** OpenRouter counts a failed
+request — including a 429 from upstream provider throttling — against your
+daily quota the same as a successful one. Our `MAX_RETRIES` (default 4)
+retries on 429s automatically, so one throttled call can cost up to 5 of
+your daily 50 requests instead of 1. If you're on an unfunded OpenRouter
+account, consider setting `MAX_RETRIES=1` or `2` in `.env` — better to fail
+fast and try again later than burn through the day's budget retrying.
 
 ## Why two LLM providers
 

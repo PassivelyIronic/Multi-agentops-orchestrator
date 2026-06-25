@@ -44,6 +44,17 @@ def test_routes_to_anthropic(monkeypatch):
     assert called.get("hit") is True
 
 
+def test_routes_to_openrouter(monkeypatch):
+    called = {}
+    monkeypatch.setattr(
+        llm_client, "_call_openrouter", lambda *a, **k: called.setdefault("hit", True)
+    )
+
+    llm_client.call_with_tools([], [], config=_fake_config("openrouter"))
+
+    assert called.get("hit") is True
+
+
 def test_unknown_provider_raises():
     with pytest.raises(ValueError):
         llm_client.call_with_tools([], [], config=_fake_config("made-up"))
