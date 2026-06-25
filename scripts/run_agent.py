@@ -4,10 +4,12 @@ through the orchestrator — useful for testing one role in isolation.
 Makes real API calls, so it's not part of the automated test suite.
 
 Usage:
-    PYTHONPATH=src python scripts/run_agent.py swe "create hello.txt containing 'hi'"
-    PYTHONPATH=src python scripts/run_agent.py tester "write tests for fizzbuzz.py"
-    PYTHONPATH=src python scripts/run_agent.py oncall "check recent traces for any errors"
-    PYTHONPATH=src python scripts/run_agent.py pm "we need user authentication"
+    python scripts/run_agent.py swe "create hello.txt containing 'hi'"
+    python scripts/run_agent.py tester "write tests for fizzbuzz.py"
+    python scripts/run_agent.py oncall "check recent traces for any errors"
+    python scripts/run_agent.py pm "we need user authentication"
+
+No need to set PYTHONPATH first — see the sys.path note below.
 
 The --agent choices are read from AVAILABLE_AGENTS, so this script doesn't
 need updating when a new agent role is added in the future.
@@ -16,9 +18,16 @@ need updating when a new agent role is added in the future.
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 
-from orchestrator.orchestrator import AVAILABLE_AGENTS
-from orchestrator.tools import (  # noqa: F401  (imports register tools as a side effect)
+# Makes `python scripts/run_agent.py` work directly, with no PYTHONPATH
+# setup — `PYTHONPATH=src python ...` is bash syntax and doesn't work in
+# cmd.exe (needs a separate `set` or `&&`-chaining there instead).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from orchestrator.orchestrator import AVAILABLE_AGENTS  # noqa: E402
+from orchestrator.tools import (  # noqa: E402,F401  (imports register tools as a side effect)
     exec_tools,
     filesystem_tools,
     monitoring_tools,

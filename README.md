@@ -43,13 +43,13 @@ cp .env.example .env   # fill in at least one API key
 pytest                  # 112 tests, all mocked — no API key needed to run these
 
 # Real end-to-end smoke test, single agent (uses your API key):
-PYTHONPATH=src python scripts/run_swe_agent.py "create hello.txt containing 'hi'"
+python scripts/run_swe_agent.py "create hello.txt containing 'hi'"
 
 # Any agent role in isolation (swe | tester | oncall | pm):
-PYTHONPATH=src python scripts/run_agent.py tester "write tests for fizzbuzz.py"
+python scripts/run_agent.py tester "write tests for fizzbuzz.py"
 
 # Orchestrator: decomposes the task, routes subtasks across roles, checkpoints to SQLite
-PYTHONPATH=src python scripts/run_orchestrator.py "create fizzbuzz.py with tests, then run them"
+python scripts/run_orchestrator.py "create fizzbuzz.py with tests, then run them"
 ```
 
 ## Agent roles

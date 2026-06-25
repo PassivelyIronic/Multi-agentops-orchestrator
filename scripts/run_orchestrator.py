@@ -4,7 +4,9 @@ decomposition, more for each routed subtask), so it's not part of the
 automated test suite (those mock everything; see tests/unit/test_orchestrator.py).
 
 Usage:
-    PYTHONPATH=src python scripts/run_orchestrator.py "create fizzbuzz.py with tests, then run them"
+    python scripts/run_orchestrator.py "create fizzbuzz.py with tests, then run them"
+
+No need to set PYTHONPATH first — see the sys.path note below.
 
 To see resumability: note the printed task_id, kill the process (Ctrl+C)
 after a subtask finishes, then re-run with --task-id <same id>. It will
@@ -21,15 +23,22 @@ unexpected still goes wrong.
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 
-from orchestrator.orchestrator import run
-from orchestrator.tools import (  # noqa: F401  (imports register tools as a side effect)
+# Makes `python scripts/run_orchestrator.py` work directly, with no
+# PYTHONPATH setup — `PYTHONPATH=src python ...` is bash syntax and
+# doesn't work in cmd.exe (needs a separate `set` or `&&`-chaining there).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from orchestrator.orchestrator import run  # noqa: E402
+from orchestrator.tools import (  # noqa: E402,F401  (imports register tools as a side effect)
     exec_tools,
     filesystem_tools,
     monitoring_tools,
     search_tools,
 )
-from orchestrator.tracing import new_task_id
+from orchestrator.tracing import new_task_id  # noqa: E402
 
 
 def main() -> None:
