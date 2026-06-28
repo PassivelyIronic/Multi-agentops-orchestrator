@@ -167,6 +167,28 @@ class BaseAgent:
             self._log_tool(step, call, result, blocked=True, latency=time.monotonic() - tool_start)
             return result
 
+        if "_malformed_arguments" in call.arguments:
+            # llm_client._call_openrouter couldn't parse this call's
+            # arguments as JSON (seen in practice with gpt-oss-120b on
+            # OpenRouter). Without this, the call would reach
+            # registry.execute() and fail with a confusing
+            # "unexpected keyword argument '_malformed_arguments'"
+            # TypeError — technically informative, but indirect enough that
+            # a model receiving it gave up instead of retrying. This is
+            # explicit about what to do instead.
+            result = ToolResult(
+                tool_call_id=call.id,
+                name=call.name,
+                output=(
+                    "Your arguments for this tool call were not valid JSON and could not be "
+                    "parsed. Please retry this exact tool call with syntactically valid JSON "
+                    "arguments."
+                ),
+                is_error=True,
+            )
+            self._log_tool(step, call, result, blocked=False, latency=time.monotonic() - tool_start)
+            return result
+
         violation = guardrails.check(
             call.name, call.arguments, self.config, agent_name=self.agent_name
         )

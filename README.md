@@ -31,7 +31,7 @@ model APIs).
 | 2 | Guardrails (command/path policy, audit-logged blocks) + structured tracing | ✅ |
 | 3 | Orchestrator (task decomposition, SQLite state, routing, resumability) | ✅ |
 | 4 | Remaining agents (Tester, On-call, PM) | ✅ |
-| 5 | Eval harness (golden dataset, LLM-as-judge) | ⬜ |
+| 5 | Eval harness (golden dataset, LLM-as-judge) | ✅ |
 | 6 | Dashboard + polish | ⬜ |
 
 ## Try it
@@ -40,7 +40,7 @@ model APIs).
 conda env create -f environment.yml
 conda activate agentops
 cp .env.example .env   # fill in at least one API key
-pytest                  # 112 tests, all mocked — no API key needed to run these
+pytest                  # 140 tests, all mocked — no API key needed to run these
 
 # Real end-to-end smoke test, single agent (uses your API key):
 python scripts/run_swe_agent.py "create hello.txt containing 'hi'"
@@ -96,8 +96,25 @@ your daily 50 requests instead of 1. If you're on an unfunded OpenRouter
 account, consider setting `MAX_RETRIES=1` or `2` in `.env` — better to fail
 fast and try again later than burn through the day's budget retrying.
 
-## Why two LLM providers
+## Eval harness
 
-Development happens for free against a Gemini key; Anthropic is used selectively
-(e.g. evaluation runs) without touching agent code, because `llm_client.py`
-normalizes both providers into one response shape. See `src/orchestrator/llm_client.py`.
+```bash
+python eval/run_eval.py                              # full golden dataset (10 tasks)
+python eval/run_eval.py --ids swe_fizzbuzz,swe_bugfix # a subset
+```
+
+Each task runs in its own isolated directory under `eval/runs/<task_id>/` —
+never the shared `./workspace` — so results are reproducible. Verification
+is mechanical wherever possible (file exists/content, command exit code)
+and falls back to an LLM-as-judge call only for genuinely qualitative
+criteria (e.g. "is this backlog well-prioritized?"). Two of the ten tasks
+exist specifically to test guardrails, not just capability:
+`tester_respects_scope` verifies the implementation file is byte-identical
+after a task that tempts the tester into "helpfully" refactoring it, and
+`pm_writes_markdown_only` verifies no `.py` file gets created. A markdown
+report (pass rate, tokens, per-task detail, failure reasoning) is written
+to `eval/report.md`.
+
+Cost note: a full run is ~25-35 LLM calls — a meaningful chunk of
+OpenRouter's free-tier daily budget (see above). Use `--ids` for a subset,
+or a funded account / Gemini for a full run.

@@ -20,6 +20,7 @@ from orchestrator.agents.base_agent import BaseAgent
 from orchestrator.config import Config
 from orchestrator.llm_client import LLMResponse, ToolCall
 from orchestrator.tools.registry import ToolRegistry, ToolSpec
+from orchestrator.tracing import TraceLogger
 
 
 def _fake_config(trace_dir, **overrides) -> Config:
@@ -395,3 +396,81 @@ def test_role_scoped_guardrail_blocks_before_real_tool_runs(monkeypatch, tmp_pat
 
     assert written["hit"] is False  # the real tool function never ran
     assert result.stopped_reason == "done"  # the agent loop itself didn't crash
+
+
+def test_malformed_arguments_get_an_actionable_error_not_a_confusing_typeerror(
+    monkeypatch, tmp_path
+):
+    """Seen live with gpt-oss-120b on OpenRouter: a tool call with broken
+    JSON arguments used to surface as 'write_file() got an unexpected
+    keyword argument _malformed_arguments' — technically informative, but
+    indirect enough that the model gave up instead of retrying. This
+    should now get an explicit instruction to retry with valid JSON, and
+    the real tool function must never be called with the bogus kwarg."""
+    called = {"hit": False}
+
+    def fake_write_file(path, content):
+        called["hit"] = True
+        return "should never run"
+
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="write_file",
+            description="Writes a file.",
+            input_schema={"type": "object", "properties": {}},
+            fn=fake_write_file,
+        )
+    )
+
+    responses = [
+        LLMResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(
+                    id="1", name="write_file", arguments={"_malformed_arguments": "{not valid"}
+                )
+            ],
+        ),
+        LLMResponse(text="done", tool_calls=[]),
+    ]
+    monkeypatch.setattr(base_agent_module, "call_with_tools", lambda *a, **k: responses.pop(0))
+    _stub_turn_builders(monkeypatch)
+
+    class _SomeAgent(BaseAgent):
+        system_prompt = "test"
+        tool_names = ["write_file"]
+
+    agent = _SomeAgent(config=_fake_config(tmp_path), tool_registry=reg)
+    result = agent.run("write a file")
+
+    assert called["hit"] is False
+    assert result.stopped_reason == "done"
+
+
+def test_malformed_arguments_error_message_is_actionable(tmp_path):
+    """Direct check on _execute_tool's output (not just that the loop
+    survives) — the message must actually tell the model what to do."""
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="write_file",
+            description="Writes a file.",
+            input_schema={"type": "object", "properties": {}},
+            fn=lambda **kwargs: "should never run",
+        )
+    )
+
+    class _SomeAgent(BaseAgent):
+        system_prompt = "test"
+        tool_names = ["write_file"]
+
+    agent = _SomeAgent(config=_fake_config(tmp_path), tool_registry=reg)
+    agent.tracer = TraceLogger(task_id="t-malformed", config=agent.config)
+
+    call = ToolCall(id="1", name="write_file", arguments={"_malformed_arguments": "{not valid"})
+    result = agent._execute_tool(call, step=1)
+
+    assert result.is_error is True
+    assert "valid json" in result.output.lower()
+    assert "retry" in result.output.lower()

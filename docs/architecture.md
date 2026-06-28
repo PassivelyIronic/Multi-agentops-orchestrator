@@ -95,6 +95,16 @@ means a few failure modes need handling before the happy path matters:
   a retry with the same task_id re-decomposes cleanly). The result: a
   quota/network failure marks one subtask failed and stays resumable,
   instead of taking down the run.
+- **Malformed tool-call arguments get an actionable error, not a confusing
+  one.** Seen live with `gpt-oss-120b` on OpenRouter: a tool call with
+  broken JSON in its arguments used to surface to the model as
+  `write_file() got an unexpected keyword argument '_malformed_arguments'`
+  — technically informative, but indirect enough that the model gave up
+  instead of retrying, silently leaving a subtask's actual deliverable
+  unwritten while still reporting `stopped_reason="done"`. `_execute_tool`
+  now recognizes this case explicitly and returns "your arguments weren't
+  valid JSON, please retry" instead, before the call ever reaches the real
+  tool function.
 - **Sandboxing**, hardcoded into the tools themselves. Filesystem tools
   resolve every path and reject anything outside the sandbox root
   (including `../` traversal and absolute paths). The exec tool uses
@@ -193,6 +203,52 @@ The decomposition prompt also got richer here: with one agent, just
 listing its name was enough context; with four roles, the model needs a
 one-line description of each to route sensibly — see `AGENT_DESCRIPTIONS`
 in `orchestrator.py`.
+
+## Eval harness (Phase 5)
+
+The motivating example for this whole phase happened live, during manual
+testing of Phase 4: an orchestrator run asked the SWE agent to implement
+`validate_input`. A malformed tool call meant `write_file` failed; the
+model gave up rather than retry, and returned `stopped_reason="done"`
+anyway. The orchestrator, which only checks `stopped_reason`, accepted
+that as success and moved on. The fact that the implementation was never
+actually written only became visible because the *next* subtask (Tester)
+happened to notice the file didn't exist. If the pipeline had ended one
+step earlier, nothing would have caught it.
+
+**`stopped_reason="done"` means the model stopped calling tools — it does
+not mean the task was actually accomplished.** That gap is exactly what an
+eval harness exists to close, and the bug above is now one of the ten
+golden-dataset tasks (`swe_bugfix`, which seeds a known-broken
+`fizzbuzz.py` and verifies via `pytest -q` actually passing, not via
+trusting the agent's summary).
+
+- **Verification is mechanical wherever possible** (`eval_runner.py`):
+  file existence, file content, exact-content-unchanged, glob-absence, or
+  a command's exit code. These are deterministic and free. LLM-as-judge
+  (`eval_judge.py`) is the fallback for genuinely qualitative criteria —
+  e.g. "is this backlog prioritized with rationale?" — not the default,
+  because it's a probabilistic approximation that costs a call.
+- **Guardrails get their own golden tasks, not just capability checks.**
+  `tester_respects_scope` gives the tester a task explicitly designed to
+  tempt it into "helpfully" refactoring `fizzbuzz.py`, then verifies the
+  file is byte-identical afterward — testing that the Phase 4 write-path
+  restriction actually holds under model behavior, not just that
+  `guardrails.check()` returns the right thing in isolation (already
+  covered by `test_guardrails.py`). `pm_writes_markdown_only` does the
+  same for the PM agent's `.py`-write restriction.
+- **Every task runs in its own isolated directory** under
+  `eval/runs/<task_id>/` — sandbox, traces, and SQLite state all scoped to
+  that one run via `dataclasses.replace(config, ...)`. This exists because
+  of another real failure mode hit during manual testing: a leftover
+  `test_fizzbuzz.py` from an earlier interactive session confused a later
+  one. Eval results need to be reproducible in a way ad hoc testing in the
+  shared `./workspace` isn't.
+- **The eval harness treats agent-level exceptions as its own bug, not the
+  dataset's.** `run_task` wraps the agent/orchestrator call in a try/except
+  even though `BaseAgent.run()` is designed to never raise (see above) —
+  belt-and-suspenders so one broken task can't take down a whole dataset
+  run.
 
 ## Status
 
