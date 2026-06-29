@@ -4,25 +4,27 @@ A multi-agent system that simulates a small dev team — Software Engineer, Test
 On-call, and Product Manager agents — coordinated by an orchestrator with tool use,
 guardrails, and an evaluation harness.
 
-<!-- Replace OWNER below once pushed to GitHub -->
-![CI](https://github.com/OWNER/agentops-orchestrator/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/PassivelyIronic/Multi-agentops-orchestrator/actions/workflows/ci.yml/badge.svg)
 
 ## What this does
 
 Given a task (e.g. "add a `/health` endpoint", "fix a failing test"), the orchestrator
 decomposes it and routes work to specialized agents. Each agent uses a defined set of
-tools (filesystem, exec, git, search, monitoring) under step limits and guardrails.
+tools (filesystem, exec, web search, monitoring) under step limits and guardrails.
 Every tool call is traced — tokens, cost, latency — and viewable in a live dashboard.
 
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for the component diagram and
-rationale (including why there's a provider-agnostic LLM client behind two different
-model APIs).
+rationale (including why there's a provider-agnostic LLM client behind three
+different model APIs).
 
 ## Status
 
-🚧 Work in progress.
+All 6 planned phases are implemented and tested (151 tests). `git_tools.py` is
+the one deliberately-unimplemented stub left from Phase 1 — committing is
+exactly the kind of action that should go through a guardrails review before
+shipping it, and that review hasn't happened yet; see its docstring.
 
 | Phase | What | Status |
 |---|---|---|
@@ -32,7 +34,7 @@ model APIs).
 | 3 | Orchestrator (task decomposition, SQLite state, routing, resumability) | ✅ |
 | 4 | Remaining agents (Tester, On-call, PM) | ✅ |
 | 5 | Eval harness (golden dataset, LLM-as-judge) | ✅ |
-| 6 | Dashboard + polish | ⬜ |
+| 6 | Dashboard + polish | ✅ |
 
 ## Try it
 
@@ -40,7 +42,7 @@ model APIs).
 conda env create -f environment.yml
 conda activate agentops
 cp .env.example .env   # fill in at least one API key
-pytest                  # 147 tests, all mocked — no API key needed to run these
+pytest                  # 151 tests, all mocked — no API key needed to run these
 
 # Real end-to-end smoke test, single agent (uses your API key):
 python scripts/run_swe_agent.py "create hello.txt containing 'hi'"
@@ -118,3 +120,17 @@ to `eval/report.md`.
 Cost note: a full run is ~25-35 LLM calls — a meaningful chunk of
 OpenRouter's free-tier daily budget (see above). Use `--ids` for a subset,
 or a funded account / Gemini for a full run.
+
+## Dashboard
+
+```bash
+streamlit run dashboard/app.py
+```
+
+Reads the exact same JSONL traces and SQLite state every other part of
+this project already writes — no separate data pipeline. Shows: overall
+success rate and token totals, a sortable table of recent tasks, a
+per-task timeline (every LLM call, tool call, and error in order, with
+latency/tokens/blocked flags), and orchestrator plans with their subtask
+breakdown. Auto-refreshes every 5 seconds, so you can leave it open in a
+second window while running tasks in a terminal.

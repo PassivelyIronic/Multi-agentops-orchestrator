@@ -320,7 +320,10 @@ def test_run_task_with_real_agent_and_real_tools_isolates_correctly(monkeypatch,
     import orchestrator.agents.base_agent as base_agent_module
     from orchestrator.agents.swe_agent import SweAgent
     from orchestrator.llm_client import LLMResponse, ToolCall
-    from orchestrator.tools import filesystem_tools  # noqa: F401  (registers real tools)
+    from orchestrator.tools import (
+        exec_tools,  # noqa: F401  (registers real tools)
+        filesystem_tools,  # noqa: F401
+    )
 
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("GEMINI_API_KEY", "fake")

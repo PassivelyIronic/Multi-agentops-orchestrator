@@ -298,6 +298,33 @@ and *real* `filesystem_tools.write_file`, not stand-ins) are written
 specifically to span that seam, since that's exactly what let this slip
 through originally.
 
+## Dashboard (Phase 6)
+
+`dashboard/app.py` is deliberately a pure read-only consumer of data
+everything else already produces — `tracing.py`'s JSONL files and
+`state.py`'s SQLite tables. No new storage format, no second source of
+truth to keep in sync with the rest of the system; this is the same
+dogfooding principle the on-call agent's `query_traces` tool follows in
+Phase 4, applied to a human-facing view instead of an agent-facing tool.
+
+Verified with `streamlit.testing.v1.AppTest` rather than just a syntax
+check — running the actual script headlessly and asserting on its
+rendered elements (metrics, dataframe, expanders) is what caught a real
+issue during development: `use_container_width`, used on `st.dataframe`,
+had already passed its stated removal date (2025-12-31) by the time this
+was written, silently still working but logging a deprecation warning on
+every run. Caught and replaced with `width="stretch"` before it became a
+runtime break on some future Streamlit upgrade.
+
+One Streamlit-specific gotcha surfaced by testing the dashboard this way:
+`@st.cache_data` on the loader functions takes no arguments, so its cache
+key doesn't depend on which `TRACE_DIR`/`DB_PATH` are active. Harmless for
+real usage (one long-lived server process reads one fixed `.env` for its
+whole life), but running `AppTest.from_file` multiple times in the same
+test session with different monkeypatched env vars leaked one test's data
+into the next until the test fixture explicitly cleared the cache between
+runs.
+
 ## Status
 
 This document grows alongside the implementation. See the phase table in the
