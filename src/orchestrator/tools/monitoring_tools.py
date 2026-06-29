@@ -11,6 +11,10 @@ that's exactly the kind of thing an on-call engineer would actually look
 at: which tasks failed, which tool calls got blocked, where the errors
 were. This is the same data Phase 2 built for the dashboard, now also
 queryable by an agent.
+
+Uses get_active_config() (context.py), not get_config() directly, so an
+isolated Config built for testing or eval purposes is actually respected
+instead of silently falling back to the global env-based config.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from ..config import get_config
+from ..context import get_active_config
 from .registry import tool
 
 _MAX_RESULT_CHARS = 5_000
@@ -60,7 +64,7 @@ _HEALTH_CHECK_TIMEOUT_SECONDS = 5
     },
 )
 def query_traces(task_id_prefix: str = "", event_type: str = "", errors_only: bool = False) -> str:
-    trace_dir = Path(get_config().trace_dir)
+    trace_dir = Path(get_active_config().trace_dir)
     if not trace_dir.is_dir():
         return "No trace directory found — no agent runs have happened yet."
 

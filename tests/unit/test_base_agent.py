@@ -474,3 +474,63 @@ def test_malformed_arguments_error_message_is_actionable(tmp_path):
     assert result.is_error is True
     assert "valid json" in result.output.lower()
     assert "retry" in result.output.lower()
+
+
+def test_real_write_file_respects_the_calling_agents_config_not_the_global_one(
+    monkeypatch, tmp_path
+):
+    """The actual regression caught live during Phase 5 eval testing: an
+    eval task built an isolated Config (different sandbox_dir than the
+    process-wide env var), passed it to an agent, and the agent's tool
+    calls silently used the GLOBAL env-based sandbox_dir instead — because
+    filesystem_tools.py called get_config() directly rather than respecting
+    self.config. The agent "succeeded" against one directory while
+    eval_runner.py's verification checked a completely different one.
+
+    This uses the REAL write_file function (imported from
+    filesystem_tools, not a stand-in) through the REAL shared registry,
+    specifically to prove the fix holds for the actual tool implementation
+    base_agent.py calls in production — not just the contextvar mechanism
+    in isolation (see test_context.py for that)."""
+    from orchestrator.tools import filesystem_tools  # noqa: F401  (registers real tools)
+    from orchestrator.tools.registry import registry as shared_registry
+
+    env_sandbox = tmp_path / "env_workspace"
+    agent_sandbox = tmp_path / "isolated_workspace"
+    env_sandbox.mkdir()
+    agent_sandbox.mkdir()
+
+    # The "wrong" sandbox a buggy tool would fall back to.
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    monkeypatch.setenv("SANDBOX_DIR", str(env_sandbox))
+
+    # The "right" sandbox — explicitly passed to this agent, same way
+    # eval_runner.py builds an isolated Config per task.
+    agent_config = _fake_config(
+        tmp_path / "traces", sandbox_dir=str(agent_sandbox), llm_provider="gemini"
+    )
+
+    responses = [
+        LLMResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(id="1", name="write_file", arguments={"path": "out.txt", "content": "hi"})
+            ],
+        ),
+        LLMResponse(text="done", tool_calls=[]),
+    ]
+    monkeypatch.setattr(base_agent_module, "call_with_tools", lambda *a, **k: responses.pop(0))
+    _stub_turn_builders(monkeypatch)
+
+    class _RealToolAgent(BaseAgent):
+        agent_name = "swe"
+        system_prompt = "test"
+        tool_names = ["write_file"]
+
+    agent = _RealToolAgent(config=agent_config, tool_registry=shared_registry)
+    result = agent.run("write a file")
+
+    assert result.stopped_reason == "done"
+    assert (agent_sandbox / "out.txt").is_file()
+    assert not (env_sandbox / "out.txt").exists()

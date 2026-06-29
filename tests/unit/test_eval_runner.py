@@ -306,3 +306,56 @@ def test_eval_report_markdown_includes_failure_details():
     assert "FAIL" in md
     assert "verification detail here" in md
     assert "boom" in md
+
+
+def test_run_task_with_real_agent_and_real_tools_isolates_correctly(monkeypatch, tmp_path):
+    """End-to-end regression for the exact bug caught live in Phase 5: the
+    existing isolation tests above use a fake agent that manually writes
+    into self.config.sandbox_dir, bypassing the real tool-calling path
+    entirely — they'd have passed even with the bug, since the bug lived
+    specifically in the seam between an agent's Config and the real tool
+    functions it calls. This uses the real SweAgent + real filesystem_tools
+    through run_task itself, with only the LLM call mocked, to prove the
+    full eval pipeline actually isolates end-to-end."""
+    import orchestrator.agents.base_agent as base_agent_module
+    from orchestrator.agents.swe_agent import SweAgent
+    from orchestrator.llm_client import LLMResponse, ToolCall
+    from orchestrator.tools import filesystem_tools  # noqa: F401  (registers real tools)
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    # The "wrong" sandbox a buggy tool would fall back to — deliberately
+    # different from where run_task isolates this task's real sandbox.
+    monkeypatch.setenv("SANDBOX_DIR", str(tmp_path / "wrong_global_sandbox"))
+
+    monkeypatch.setattr(eval_runner_module, "AVAILABLE_AGENTS", {"swe": SweAgent})
+
+    responses = [
+        LLMResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(id="1", name="write_file", arguments={"path": "out.txt", "content": "hi"})
+            ],
+        ),
+        LLMResponse(text="done", tool_calls=[]),
+    ]
+    monkeypatch.setattr(base_agent_module, "call_with_tools", lambda *a, **k: responses.pop(0))
+    monkeypatch.setattr(
+        base_agent_module, "to_assistant_turn", lambda *a, **k: [{"role": "assistant"}]
+    )
+    monkeypatch.setattr(
+        base_agent_module, "to_tool_result_turn", lambda *a, **k: [{"role": "user"}]
+    )
+
+    task = GoldenTask(
+        id="real_isolation_test",
+        agent="swe",
+        task="write a file",
+        verification={"type": "file_exists", "path": "out.txt"},
+    )
+
+    result = run_task(task, work_root=tmp_path / "runs")
+
+    assert result.passed is True
+    assert (tmp_path / "runs" / "real_isolation_test" / "workspace" / "out.txt").is_file()
+    assert not (tmp_path / "wrong_global_sandbox" / "out.txt").exists()

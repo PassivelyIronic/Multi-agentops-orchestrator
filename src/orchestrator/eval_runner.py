@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field, replace
@@ -144,6 +145,13 @@ def run_task(
     task_dir = work_root / golden_task.id
     sandbox_dir = task_dir / "workspace"
     trace_dir = task_dir / "traces"
+
+    # Wipe any leftover state from a previous run of this exact task_id —
+    # setup_sandbox below only overwrites the files it explicitly lists, so
+    # without this, anything an agent wrote beyond that (extra files,
+    # __pycache__, a stale state.db) would carry over and make repeated
+    # runs of the same task non-reproducible.
+    shutil.rmtree(task_dir, ignore_errors=True)
     sandbox_dir.mkdir(parents=True, exist_ok=True)
     trace_dir.mkdir(parents=True, exist_ok=True)
 

@@ -250,6 +250,54 @@ trusting the agent's summary).
   belt-and-suspenders so one broken task can't take down a whole dataset
   run.
 
+## Config isolation bug, caught by the eval harness itself (Phase 5.1)
+
+Shortly after Phase 5 shipped, two golden tasks (`swe_bugfix`,
+`pm_writes_markdown_only`) started failing in a way that didn't add up:
+the agent's *own* tool calls reported success (`run_command("pytest -q")`
+returning `exit_code=0`; `write_file` reporting "Wrote 1737 chars to
+BACKLOG.md"), while the eval's verification step — checking the exact
+same files — reported failure. Both were telling the truth; they were
+looking at two different directories.
+
+The cause: `filesystem_tools.py`, `exec_tools.py`, and
+`monitoring_tools.py` called `get_config()` directly, which reads fresh
+from environment variables every time. `eval_runner.py` isolates each
+task by building a custom `Config` via `dataclasses.replace(cfg,
+sandbox_dir=..., trace_dir=..., db_path=...)` and passing it to the agent
+— and the agent itself correctly used that config everywhere *it*
+touched directly (step limits, timeouts, tracing). But every tool the
+agent *called* ignored it and read the global env-based sandbox/trace dir
+instead. The agent would fix `fizzbuzz.py` and run tests successfully —
+against the shared `./workspace`, accumulated from months of interactive
+testing — while the verification step checked the freshly-seeded, still-
+broken copy in the isolated eval sandbox that the agent's tools had never
+actually touched.
+
+This had been latent since Phase 1. It went unnoticed because every
+existing test exercised one side of the seam but never both at once: the
+filesystem/exec tool tests set environment variables directly and call
+the tool functions standalone (so isolation never enters the picture);
+the agent-loop tests use fake stand-in tool functions that don't call
+`get_config()` at all (so the real tools' behavior never enters the
+picture). The bug lived specifically in the gap between "agent has a
+custom Config" and "the real tool functions it calls respect it" — a seam
+nothing was testing until Phase 5 built infrastructure that actually
+needed per-instance isolation.
+
+Fixed via `context.py`: a `contextvars.ContextVar` holding the "active"
+config, set by `base_agent.py` for the duration of each tool call
+(`with use_config(self.config): ...`) and read by tool functions via
+`get_active_config()` instead of `get_config()` directly. Falls back to
+the global env-based config when nothing is set, so calling a tool
+function standalone — exactly what the existing filesystem/exec tool
+tests already do — behaves exactly as before. The regression tests added
+alongside this fix (`test_context.py`, plus an end-to-end test in
+`test_base_agent.py` and `test_eval_runner.py` using the *real* `SweAgent`
+and *real* `filesystem_tools.write_file`, not stand-ins) are written
+specifically to span that seam, since that's exactly what let this slip
+through originally.
+
 ## Status
 
 This document grows alongside the implementation. See the phase table in the

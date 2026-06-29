@@ -40,7 +40,7 @@ model APIs).
 conda env create -f environment.yml
 conda activate agentops
 cp .env.example .env   # fill in at least one API key
-pytest                  # 140 tests, all mocked — no API key needed to run these
+pytest                  # 147 tests, all mocked — no API key needed to run these
 
 # Real end-to-end smoke test, single agent (uses your API key):
 python scripts/run_swe_agent.py "create hello.txt containing 'hi'"

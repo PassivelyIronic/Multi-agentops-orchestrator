@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 from .. import guardrails
 from ..config import Config, get_config
+from ..context import use_config
 from ..llm_client import (
     ToolCall,
     ToolResult,
@@ -200,7 +201,8 @@ class BaseAgent:
             return result
 
         try:
-            output = self.registry.execute(call.name, call.arguments)
+            with use_config(self.config):
+                output = self.registry.execute(call.name, call.arguments)
             result = ToolResult(tool_call_id=call.id, name=call.name, output=output, is_error=False)
         except Exception as exc:
             result = ToolResult(
