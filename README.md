@@ -4,7 +4,6 @@ A multi-agent system that simulates a small dev team — Software Engineer, Test
 On-call, and Product Manager agents — coordinated by an orchestrator with tool use,
 guardrails, and an evaluation harness.
 
-![CI](https://github.com/PassivelyIronic/Multi-agentops-orchestrator/actions/workflows/ci.yml/badge.svg)
 
 ## What this does
 
