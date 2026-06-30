@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 from .. import guardrails
 from ..config import Config, get_config
+from ..context import use_config
 from ..llm_client import (
     ToolCall,
     ToolResult,
@@ -51,6 +52,11 @@ class AgentResult:
 
 class BaseAgent:
     system_prompt: str = ""
+    # Identifies the role to guardrails.py (e.g. "tester" can only write
+    # test_*.py files) and to AVAILABLE_AGENTS in orchestrator.py, which
+    # builds its routing dict from this rather than a separately
+    # maintained string, so the two can't drift out of sync.
+    agent_name: str = "base"
     # Subclasses override this with their own list — never mutated in place,
     # so sharing this empty list as a class-level default is safe.
     tool_names: list[str] = []
@@ -162,7 +168,31 @@ class BaseAgent:
             self._log_tool(step, call, result, blocked=True, latency=time.monotonic() - tool_start)
             return result
 
-        violation = guardrails.check(call.name, call.arguments, self.config)
+        if "_malformed_arguments" in call.arguments:
+            # llm_client._call_openrouter couldn't parse this call's
+            # arguments as JSON (seen in practice with gpt-oss-120b on
+            # OpenRouter). Without this, the call would reach
+            # registry.execute() and fail with a confusing
+            # "unexpected keyword argument '_malformed_arguments'"
+            # TypeError — technically informative, but indirect enough that
+            # a model receiving it gave up instead of retrying. This is
+            # explicit about what to do instead.
+            result = ToolResult(
+                tool_call_id=call.id,
+                name=call.name,
+                output=(
+                    "Your arguments for this tool call were not valid JSON and could not be "
+                    "parsed. Please retry this exact tool call with syntactically valid JSON "
+                    "arguments."
+                ),
+                is_error=True,
+            )
+            self._log_tool(step, call, result, blocked=False, latency=time.monotonic() - tool_start)
+            return result
+
+        violation = guardrails.check(
+            call.name, call.arguments, self.config, agent_name=self.agent_name
+        )
         if violation is not None:
             result = ToolResult(
                 tool_call_id=call.id, name=call.name, output=violation.reason, is_error=True
@@ -171,7 +201,8 @@ class BaseAgent:
             return result
 
         try:
-            output = self.registry.execute(call.name, call.arguments)
+            with use_config(self.config):
+                output = self.registry.execute(call.name, call.arguments)
             result = ToolResult(tool_call_id=call.id, name=call.name, output=output, is_error=False)
         except Exception as exc:
             result = ToolResult(

@@ -20,6 +20,7 @@ from orchestrator.agents.base_agent import BaseAgent
 from orchestrator.config import Config
 from orchestrator.llm_client import LLMResponse, ToolCall
 from orchestrator.tools.registry import ToolRegistry, ToolSpec
+from orchestrator.tracing import TraceLogger
 
 
 def _fake_config(trace_dir, **overrides) -> Config:
@@ -343,3 +344,193 @@ def test_trace_file_is_written(monkeypatch, tmp_path):
     types_seen = {r["type"] for r in records}
     assert "llm_call" in types_seen
     assert "task_end" in types_seen
+
+
+def test_role_scoped_guardrail_blocks_before_real_tool_runs(monkeypatch, tmp_path):
+    """End-to-end wiring check (Phase 4): an agent identifying as "tester"
+    must have its write_file call to a non-test path blocked by the real
+    (non-mocked) guardrails.check — and the real write_file function must
+    never actually execute. This is the integration point between
+    base_agent.py passing self.agent_name through and guardrails.py's
+    role-scoped rule actually using it."""
+    written = {"hit": False}
+
+    def fake_write_file(path, content):
+        written["hit"] = True
+        return f"wrote {path}"
+
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="write_file",
+            description="Writes a file.",
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            },
+            fn=fake_write_file,
+        )
+    )
+
+    responses = [
+        LLMResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(
+                    id="1", name="write_file", arguments={"path": "fizzbuzz.py", "content": "x"}
+                )
+            ],
+        ),
+        LLMResponse(text="done", tool_calls=[]),
+    ]
+    monkeypatch.setattr(base_agent_module, "call_with_tools", lambda *a, **k: responses.pop(0))
+    _stub_turn_builders(monkeypatch)
+
+    class _TesterLikeAgent(BaseAgent):
+        agent_name = "tester"
+        system_prompt = "test"
+        tool_names = ["write_file"]
+
+    agent = _TesterLikeAgent(config=_fake_config(tmp_path), tool_registry=reg)
+    result = agent.run("write tests, but try to write to fizzbuzz.py instead")
+
+    assert written["hit"] is False  # the real tool function never ran
+    assert result.stopped_reason == "done"  # the agent loop itself didn't crash
+
+
+def test_malformed_arguments_get_an_actionable_error_not_a_confusing_typeerror(
+    monkeypatch, tmp_path
+):
+    """Seen live with gpt-oss-120b on OpenRouter: a tool call with broken
+    JSON arguments used to surface as 'write_file() got an unexpected
+    keyword argument _malformed_arguments' — technically informative, but
+    indirect enough that the model gave up instead of retrying. This
+    should now get an explicit instruction to retry with valid JSON, and
+    the real tool function must never be called with the bogus kwarg."""
+    called = {"hit": False}
+
+    def fake_write_file(path, content):
+        called["hit"] = True
+        return "should never run"
+
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="write_file",
+            description="Writes a file.",
+            input_schema={"type": "object", "properties": {}},
+            fn=fake_write_file,
+        )
+    )
+
+    responses = [
+        LLMResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(
+                    id="1", name="write_file", arguments={"_malformed_arguments": "{not valid"}
+                )
+            ],
+        ),
+        LLMResponse(text="done", tool_calls=[]),
+    ]
+    monkeypatch.setattr(base_agent_module, "call_with_tools", lambda *a, **k: responses.pop(0))
+    _stub_turn_builders(monkeypatch)
+
+    class _SomeAgent(BaseAgent):
+        system_prompt = "test"
+        tool_names = ["write_file"]
+
+    agent = _SomeAgent(config=_fake_config(tmp_path), tool_registry=reg)
+    result = agent.run("write a file")
+
+    assert called["hit"] is False
+    assert result.stopped_reason == "done"
+
+
+def test_malformed_arguments_error_message_is_actionable(tmp_path):
+    """Direct check on _execute_tool's output (not just that the loop
+    survives) — the message must actually tell the model what to do."""
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="write_file",
+            description="Writes a file.",
+            input_schema={"type": "object", "properties": {}},
+            fn=lambda **kwargs: "should never run",
+        )
+    )
+
+    class _SomeAgent(BaseAgent):
+        system_prompt = "test"
+        tool_names = ["write_file"]
+
+    agent = _SomeAgent(config=_fake_config(tmp_path), tool_registry=reg)
+    agent.tracer = TraceLogger(task_id="t-malformed", config=agent.config)
+
+    call = ToolCall(id="1", name="write_file", arguments={"_malformed_arguments": "{not valid"})
+    result = agent._execute_tool(call, step=1)
+
+    assert result.is_error is True
+    assert "valid json" in result.output.lower()
+    assert "retry" in result.output.lower()
+
+
+def test_real_write_file_respects_the_calling_agents_config_not_the_global_one(
+    monkeypatch, tmp_path
+):
+    """The actual regression caught live during Phase 5 eval testing: an
+    eval task built an isolated Config (different sandbox_dir than the
+    process-wide env var), passed it to an agent, and the agent's tool
+    calls silently used the GLOBAL env-based sandbox_dir instead — because
+    filesystem_tools.py called get_config() directly rather than respecting
+    self.config. The agent "succeeded" against one directory while
+    eval_runner.py's verification checked a completely different one.
+
+    This uses the REAL write_file function (imported from
+    filesystem_tools, not a stand-in) through the REAL shared registry,
+    specifically to prove the fix holds for the actual tool implementation
+    base_agent.py calls in production — not just the contextvar mechanism
+    in isolation (see test_context.py for that)."""
+    from orchestrator.tools import filesystem_tools  # noqa: F401  (registers real tools)
+    from orchestrator.tools.registry import registry as shared_registry
+
+    env_sandbox = tmp_path / "env_workspace"
+    agent_sandbox = tmp_path / "isolated_workspace"
+    env_sandbox.mkdir()
+    agent_sandbox.mkdir()
+
+    # The "wrong" sandbox a buggy tool would fall back to.
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    monkeypatch.setenv("SANDBOX_DIR", str(env_sandbox))
+
+    # The "right" sandbox — explicitly passed to this agent, same way
+    # eval_runner.py builds an isolated Config per task.
+    agent_config = _fake_config(
+        tmp_path / "traces", sandbox_dir=str(agent_sandbox), llm_provider="gemini"
+    )
+
+    responses = [
+        LLMResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(id="1", name="write_file", arguments={"path": "out.txt", "content": "hi"})
+            ],
+        ),
+        LLMResponse(text="done", tool_calls=[]),
+    ]
+    monkeypatch.setattr(base_agent_module, "call_with_tools", lambda *a, **k: responses.pop(0))
+    _stub_turn_builders(monkeypatch)
+
+    class _RealToolAgent(BaseAgent):
+        agent_name = "swe"
+        system_prompt = "test"
+        tool_names = ["write_file"]
+
+    agent = _RealToolAgent(config=agent_config, tool_registry=shared_registry)
+    result = agent.run("write a file")
+
+    assert result.stopped_reason == "done"
+    assert (agent_sandbox / "out.txt").is_file()
+    assert not (env_sandbox / "out.txt").exists()

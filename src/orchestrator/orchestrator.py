@@ -6,9 +6,10 @@ subtask so a crashed or restarted process resumes instead of starting over.
 Decomposition is one plain LLM call (no tools) asking for a JSON list of
 {agent, description} subtasks — reuses call_with_tools with an empty tools
 list rather than introducing a second LLM-calling path, so retries/backoff
-apply here too. Routing is keyed by agent name string via AVAILABLE_AGENTS;
-only "swe" is wired up for now — Phase 4 adds Tester/On-call/PM by adding
-entries to that dict, with no other change needed here.
+apply here too. Routing is keyed by agent name string via AVAILABLE_AGENTS,
+built from each agent class's own `agent_name` attribute rather than a
+separately maintained dict literal, so the routing key and the guardrail
+role check in guardrails.py can't drift out of sync with each other.
 
 Resumability: if a task_id already has a saved plan, run() loads it instead
 of re-decomposing (zero extra LLM cost) and continues from the first
@@ -23,13 +24,28 @@ from dataclasses import dataclass, field
 
 from . import state
 from .agents.base_agent import AgentResult, BaseAgent
+from .agents.oncall_agent import OnCallAgent
+from .agents.pm_agent import PmAgent
 from .agents.swe_agent import SweAgent
+from .agents.tester_agent import TesterAgent
 from .config import Config, get_config
 from .llm_client import call_with_tools
 from .tracing import new_task_id
 
-AVAILABLE_AGENTS: dict[str, type[BaseAgent]] = {
-    "swe": SweAgent,
+_AGENT_CLASSES: list[type[BaseAgent]] = [SweAgent, TesterAgent, OnCallAgent, PmAgent]
+AVAILABLE_AGENTS: dict[str, type[BaseAgent]] = {cls.agent_name: cls for cls in _AGENT_CLASSES}
+
+# Short enough to fit in the decomposition prompt, specific enough that the
+# model can actually tell which role fits a given piece of work — just
+# listing bare names ("swe, tester, oncall, pm") isn't enough information
+# for sensible routing once there's more than one role.
+AGENT_DESCRIPTIONS: dict[str, str] = {
+    "swe": "Writes and modifies code, runs commands. Use for implementation work.",
+    "tester": "Writes and runs tests against code that already exists. Does NOT modify "
+    "implementation files — only use after the code it's testing already exists.",
+    "oncall": "Investigates trace logs and checks service health. Read-only, no code changes.",
+    "pm": "Researches a topic and writes a prioritized task breakdown as markdown. "
+    "Use for vague/high-level requirements that need breaking down before any code is written.",
 }
 
 DECOMPOSE_SYSTEM_PROMPT = """\
@@ -39,7 +55,8 @@ agent, so its description must be self-contained — the agent doing
 subtask 2 cannot see what happened in subtask 1 except through files left
 on disk.
 
-Available agents: {agents}
+Available agents:
+{agents}
 
 Respond with ONLY a JSON array, no prose, no markdown code fences. Each
 element: {{"agent": "<agent name>", "description": "<specific instructions>"}}.
@@ -113,7 +130,8 @@ def run(task: str, config: Config | None = None, task_id: str | None = None) -> 
 
 def _decompose(task: str, cfg: Config) -> list[Subtask]:
     agents = list(AVAILABLE_AGENTS.keys())
-    system = DECOMPOSE_SYSTEM_PROMPT.format(agents=", ".join(agents))
+    agents_listing = "\n".join(f"- {name}: {AGENT_DESCRIPTIONS.get(name, '')}" for name in agents)
+    system = DECOMPOSE_SYSTEM_PROMPT.format(agents=agents_listing)
     response = call_with_tools(
         messages=[{"role": "user", "content": task}], tools=[], system=system, config=cfg
     )

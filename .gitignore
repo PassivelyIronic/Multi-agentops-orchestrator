@@ -21,6 +21,7 @@ env/
 workspace/
 traces/
 *.db
+*.code-workspace
 
 # Test / lint caches
 .pytest_cache/

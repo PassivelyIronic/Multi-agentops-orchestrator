@@ -7,20 +7,24 @@ guardrails module, because these tools touch the real filesystem the moment
 an agent runs — not a property we want to defer. Full guardrails
 (configurable allow/deny lists, audit logging) land in Phase 2; this is the
 non-negotiable minimum until then.
+
+Uses get_active_config() (context.py), not get_config() directly, so an
+isolated Config built for testing or eval purposes is actually respected
+instead of silently falling back to the global env-based config.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from ..config import get_config
+from ..context import get_active_config
 from .registry import tool
 
 _MAX_READ_CHARS = 200_000  # guard against accidentally dumping a huge file into context
 
 
 def _sandbox_root() -> Path:
-    root = Path(get_config().sandbox_dir).resolve()
+    root = Path(get_active_config().sandbox_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
     return root
 

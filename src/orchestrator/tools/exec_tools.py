@@ -12,6 +12,10 @@ Intentionally narrow for Phase 1:
 A configurable command allow/deny list is a Phase 2 guardrails concern —
 this just guarantees one run_command call can't hang forever or wander
 outside the sandbox.
+
+Uses get_active_config() (context.py), not get_config() directly, so an
+isolated Config built for testing or eval purposes is actually respected
+instead of silently falling back to the global env-based config.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
-from ..config import get_config
+from ..context import get_active_config
 from .registry import tool
 
 _MAX_OUTPUT_CHARS = 20_000
@@ -42,7 +46,7 @@ _MAX_OUTPUT_CHARS = 20_000
     },
 )
 def run_command(command: str) -> str:
-    cfg = get_config()
+    cfg = get_active_config()
     sandbox = Path(cfg.sandbox_dir).resolve()
     sandbox.mkdir(parents=True, exist_ok=True)
 
