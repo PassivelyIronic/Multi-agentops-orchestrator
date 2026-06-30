@@ -134,3 +134,4 @@ per-task timeline (every LLM call, tool call, and error in order, with
 latency/tokens/blocked flags), and orchestrator plans with their subtask
 breakdown. Auto-refreshes every 5 seconds, so you can leave it open in a
 second window while running tasks in a terminal.
+
